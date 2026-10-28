@@ -48,7 +48,7 @@
   <div id="status" hidden></div>
   <button id="sound" class="pill" hidden>🔇 Son</button>
   <div id="presets">Suivi :
-    <button data-p="stable">Stable</button><button data-p="moyen">Moyen</button><button data-p="reactif">Réactif</button>
+    <button data-p="stable">Stable</button><button data-p="moyen">Moyen</button><button data-p="reactif">Réactif</button><button data-p="optimise">Optimisé</button>
   </div>
   <button id="tapplay" class="pill" hidden>▶ Toucher pour lancer la vidéo</button>
 
@@ -69,9 +69,10 @@
     const PRESETS = {
       stable: { cf: 0.0001, beta: 0.001 },  // very smooth, lags when moving
       moyen: { cf: 0.001, beta: 0.1 },
+      optimise: { cf: 0.001, beta: 0.1, hd: true, stabilize: true },  // + 720p camera + adaptive stabilizer
       reactif: { cf: 0.001, beta: 1000 },   // MindAR default: follows fast, more jitter
     };
-    const suivi = new URLSearchParams(location.search).get('suivi') || 'moyen';
+    const suivi = new URLSearchParams(location.search).get('suivi') || 'optimise';
     const SMOOTH = PRESETS[suivi] || PRESETS.moyen;
     document.querySelectorAll('#presets button').forEach((b) => {
       if (b.dataset.p === suivi) b.classList.add('on');
@@ -137,6 +138,18 @@
       if (found) playVideo();
     });
 
+    // Ask the camera for 720p (MindAR otherwise accepts the browser's low default).
+    if (SMOOTH.hd && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = (c) => {
+        if (c && c.video) {
+          const v = typeof c.video === 'object' ? c.video : {};
+          c = { ...c, video: { ...v, width: { ideal: 1280 }, height: { ideal: 720 } } };
+        }
+        return gum(c);
+      };
+    }
+
     async function start() {
       const mindar = new URLSearchParams(location.search).has('debug') ? debugMindar() : new MindARThree({
         container: document.getElementById('ar'),
@@ -152,6 +165,10 @@
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       const anchor = mindar.addAnchor(0);
       let fitShadow = () => {};
+      // Everything rides on "stage", which follows the anchor, optionally stabilized.
+      const stage = new THREE.Group();
+      stage.matrixAutoUpdate = false;
+      scene.add(stage);
 
       // Video plane, same aspect as the video, glued on the image.
       await new Promise((res, rej) => {
@@ -168,7 +185,7 @@
         new THREE.MeshBasicMaterial({ map: tex, toneMapped: false })
       );
       plane.scale.setScalar(INNER);
-      anchor.group.add(plane);
+      stage.add(plane);
 
       // Shadow of Muse on the video: a light in front of the image and a transparent
       // shadow-catcher plane just above the video (materials stay unlit).
@@ -180,7 +197,7 @@
       );
       catcher.position.z = 0.002;
       catcher.receiveShadow = true;
-      anchor.group.add(catcher);
+      stage.add(catcher);
       const sun = new THREE.DirectionalLight(0xffffff, 1);
       sun.position.set(0.35, 0.6, 1.5);
       sun.target.position.set(0, 0, 0);
@@ -190,14 +207,14 @@
       // keep it matched to the anchor's scale every frame.
       let shadowScale = 0;
       fitShadow = () => {
-        const k = anchor.group.matrixWorld.getMaxScaleOnAxis();
+        const k = stage.matrixWorld.getMaxScaleOnAxis();
         if (!k || Math.abs(k - shadowScale) < shadowScale * 0.01) return;
         shadowScale = k;
         Object.assign(sun.shadow.camera, { left: -0.8 * k, right: 0.8 * k, top: 0.8 * k, bottom: -0.8 * k, near: 0.1 * k, far: 4 * k });
         sun.shadow.camera.updateProjectionMatrix();
       };
       sun.shadow.bias = -0.0005;
-      anchor.group.add(sun, sun.target);
+      stage.add(sun, sun.target);
 
       // Character in front of the video, on the same path as in the C4D scene.
       // The video is rendered by a static camera at +X looking -X (FOV 25.4°),
@@ -213,7 +230,7 @@
       pivot.scale.setScalar(INNER / SCENE_WIDTH_M);
       pivot.position.set(0, 0, CHAR_Z);
       model.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = true; } });
-      anchor.group.add(pivot);
+      stage.add(pivot);
       // Hair trails (C4D Sweep + Tracer): rebuilt live from baked hair-vertex positions.
       const trailInfo = await (await fetch('trail.json')).json();
       const trailData = new Float32Array(await (await fetch('trail.bin')).arrayBuffer());
@@ -273,6 +290,27 @@
       await mindar.start();
       hint.hidden = false;
       const clock = new THREE.Clock();
+      // Adaptive stabilizer: heavy smoothing for tiny (jitter) motions, direct follow for real moves.
+      const tp = new THREE.Vector3(), tq = new THREE.Quaternion(), ts = new THREE.Vector3();
+      const sp = new THREE.Vector3(), sq = new THREE.Quaternion(), ss = new THREE.Vector3();
+      let wasVisible = false;
+      function followAnchor() {
+        const g = anchor.group;
+        stage.visible = g.visible;
+        if (!g.visible) { wasVisible = false; return; }
+        g.matrix.decompose(tp, tq, ts);
+        if (!SMOOTH.stabilize || !wasVisible) {
+          sp.copy(tp); sq.copy(tq); ss.copy(ts);
+        } else {
+          const d = tp.distanceTo(sp) / Math.max(ts.x, 1e-6);   // in image widths
+          const a = sq.angleTo(tq);                             // radians
+          const alpha = Math.min(1, Math.max(0.1, Math.max(d / 0.03, a / 0.05)));
+          sp.lerp(tp, alpha); sq.slerp(tq, alpha); ss.lerp(ts, alpha);
+        }
+        wasVisible = true;
+        stage.matrix.compose(sp, sq, ss);
+        stage.matrixWorldNeedsUpdate = true;
+      }
       renderer.setAnimationLoop(() => {
         const dt = clock.getDelta();
         if (mixer && visible) {
@@ -280,6 +318,8 @@
           mixer.setTime(t);
           if (updateTrails) updateTrails(t);
         }
+        followAnchor();
+        stage.updateMatrixWorld(true);
         fitShadow();
         renderer.render(scene, camera);
       });
