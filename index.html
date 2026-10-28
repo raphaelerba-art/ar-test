@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Tests réalité augmentée – Raphaël Erba</title>
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.0.0/model-viewer.min.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; font-family: system-ui, sans-serif;
+      background: #111; color: #eee;
+      display: flex; flex-direction: column; min-height: 100vh;
+    }
+    header { padding: 16px 20px; }
+    h1 { margin: 0 0 4px; font-size: 1.2rem; }
+    p.sub { margin: 0; opacity: .7; font-size: .9rem; }
+    model-viewer {
+      flex: 1; width: 100%; min-height: 60vh;
+      --poster-color: transparent; background: #1b1b1f;
+    }
+    .ar-button {
+      position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: #fff; color: #111; border: 0; border-radius: 999px;
+      padding: 12px 22px; font-size: 1rem; font-weight: 600; cursor: pointer;
+    }
+    .controls { padding: 16px 20px; display: grid; gap: 10px; max-width: 640px; }
+    label { font-size: .85rem; opacity: .8; }
+    input[type=url], input[type=file] {
+      width: 100%; box-sizing: border-box; padding: 8px;
+      background: #222; color: #eee; border: 1px solid #444; border-radius: 6px;
+    }
+    button.load {
+      justify-self: start; padding: 8px 16px; border-radius: 6px;
+      border: 1px solid #666; background: #2a2a2e; color: #eee; cursor: pointer;
+    }
+    small { opacity: .6; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Tests réalité augmentée</h1>
+    <p class="sub">Ouvre cette page sur ton téléphone, puis touche « Voir dans mon espace ».</p>
+    <p class="sub"><a href="video.html" style="color:#fff">Test image cible : vidéo + Muse</a></p>
+  </header>
+
+  <model-viewer id="mv"
+    src="https://modelviewer.dev/shared-assets/models/Astronaut.glb"
+    alt="Modèle 3D de test"
+    ar
+    ar-modes="webxr scene-viewer quick-look"
+    ar-scale="auto"
+    camera-controls
+    touch-action="pan-y"
+    shadow-intensity="1"
+    environment-image="neutral"
+    auto-rotate>
+    <button slot="ar-button" class="ar-button">Voir dans mon espace</button>
+  </model-viewer>
+
+  <section class="controls">
+    <div>
+      <label for="url">URL d'un modèle .glb (hébergé en https)</label>
+      <input id="url" type="url" placeholder="https://…/mon-perso.glb">
+      <button class="load" id="loadUrl">Charger</button>
+    </div>
+    <div>
+      <label for="file">Ou prévisualiser un .glb local (3D uniquement, pas d'AR)</label>
+      <input id="file" type="file" accept=".glb,.gltf">
+    </div>
+    <small>
+      Pour que le bouton AR fonctionne : la page doit être en https, et le modèle
+      hébergé en ligne (les fichiers locaux ne passent pas en AR).
+    </small>
+  </section>
+
+  <script>
+    const mv = document.getElementById('mv');
+    document.getElementById('loadUrl').addEventListener('click', () => {
+      const u = document.getElementById('url').value.trim();
+      if (u) mv.src = u;
+    });
+    document.getElementById('file').addEventListener('change', e => {
+      const f = e.target.files[0];
+      if (f) mv.src = URL.createObjectURL(f);
+    });
+  </script>
+</body>
+</html>

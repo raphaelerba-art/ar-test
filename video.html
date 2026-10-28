@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Muse – AR vidéo</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: system-ui, sans-serif; }
+    #ar { position: fixed; inset: 0; }
+    #start {
+      position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px; background: #111; color: #fff; text-align: center; padding: 24px;
+    }
+    #start button { font-size: 18px; padding: 14px 28px; border: 0; border-radius: 999px; background: #fff; color: #111; }
+    #start p { max-width: 320px; opacity: .8; line-height: 1.4; }
+    #hint {
+      position: fixed; left: 0; right: 0; bottom: 24px; z-index: 5; text-align: center; color: #fff;
+      font-size: 15px; text-shadow: 0 1px 3px #000; pointer-events: none;
+    }
+    #status {
+      position: fixed; top: 8px; left: 8px; right: 8px; z-index: 6; color: #fff; font: 12px monospace;
+      background: #0008; padding: 4px 8px; border-radius: 6px; pointer-events: none;
+    }
+    .pill { position: fixed; z-index: 7; border: 0; border-radius: 999px; background: #fff; color: #111; font-size: 15px; padding: 10px 16px; }
+    #sound { right: 12px; bottom: 60px; }
+    #tapplay { left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 17px; padding: 14px 22px; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+        "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="ar"></div>
+  <div id="start">
+    <p>Vise l'image avec ton téléphone : la vidéo et le personnage apparaîtront dessus.</p>
+    <button id="go">Démarrer</button>
+  </div>
+  <div id="hint" hidden>Cherche l'image…</div>
+  <div id="status" hidden></div>
+  <button id="sound" class="pill" hidden>🔇 Son</button>
+  <button id="tapplay" class="pill" hidden>▶ Toucher pour lancer la vidéo</button>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { MindARThree } from 'mindar-image-three';
+
+    // Character placement, in units of the image width (image = 1 wide).
+    const SCENE_WIDTH_M = 2 * 20 * Math.tan(0.4426288846955826 / 2); // camera frame width at the path (≈9 m)
+    const INNER = 1.0;          // firstframe.png = video frame, full size
+    const CHAR_Z = 0.15;        // in front of the video plane, in image widths
+    const SHADOW_OPACITY = 0.35;
+
+    const hint = document.getElementById('hint');
+
+    // ?debug : no camera, shows the image anchor in front of a fixed camera (desktop check).
+    function debugMindar() {
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      document.getElementById('ar').appendChild(renderer.domElement);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x333333);
+      const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 100);
+      camera.position.set(0.9, 0.3, 2.2);
+      camera.lookAt(0, 0, 0);
+      const group = new THREE.Group();
+      scene.add(group);
+      const anchor = { group };
+      window.DBG = { scene, camera, renderer };
+      return {
+        renderer, scene, camera,
+        addAnchor: () => anchor,
+        start: async () => setTimeout(() => anchor.onTargetFound && anchor.onTargetFound(), 500),
+      };
+    }
+
+    // Video is created up front, muted, so it can be unlocked synchronously in the tap.
+    const video = document.createElement('video');
+    video.src = 'fnd.mp4';
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    video.preload = 'auto';
+
+    const status = document.getElementById('status');
+    let found = false;
+    let lastErr = '';
+    function showStatus() {
+      const st = video.error ? 'erreur ' + video.error.code : (video.paused ? 'en pause' : 'lecture');
+      status.textContent = 'image : ' + (found ? 'détectée' : 'non détectée') + ' · vidéo : ' + st +
+        ' (' + video.readyState + ')' + (lastErr ? ' · ' + lastErr : '');
+    }
+    setInterval(showStatus, 500);
+
+    const tapPlay = document.getElementById('tapplay');
+    function playVideo() {
+      video.play().then(() => { lastErr = ''; tapPlay.hidden = true; }).catch((e) => {
+        lastErr = e.name;
+        tapPlay.hidden = false;
+      });
+    }
+    tapPlay.addEventListener('click', () => { tapPlay.hidden = true; playVideo(); });
+
+    const soundBtn = document.getElementById('sound');
+    soundBtn.addEventListener('click', () => {
+      video.muted = !video.muted;
+      soundBtn.textContent = video.muted ? '🔇 Son' : '🔊 Son';
+      if (found) playVideo();
+    });
+
+    async function start() {
+      const mindar = new URLSearchParams(location.search).has('debug') ? debugMindar() : new MindARThree({
+        container: document.getElementById('ar'),
+        imageTargetSrc: 'targets.mind',
+        uiScanning: 'no',
+        uiLoading: 'yes',
+        filterMinCF: 0.0001,
+        filterBeta: 0.001,
+        warmupTolerance: 2,   // show sooner once the image is found
+        missTolerance: 30,    // keep the anchor through short tracking drops
+      });
+      const { renderer, scene, camera } = mindar;
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      const anchor = mindar.addAnchor(0);
+
+      // Video plane, same aspect as the video, glued on the image.
+      await new Promise((res, rej) => {
+        if (video.readyState >= 1) return res();
+        video.addEventListener('loadedmetadata', res, { once: true });
+        video.addEventListener('error', () => rej(new Error('vidéo illisible (code ' + (video.error && video.error.code) + ')')), { once: true });
+      });
+
+      const tex = new THREE.VideoTexture(video);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const aspect = video.videoHeight / video.videoWidth;
+      const plane = new THREE.Mesh(
+        new THREE.PlaneGeometry(1, aspect),
+        new THREE.MeshBasicMaterial({ map: tex, toneMapped: false })
+      );
+      plane.scale.setScalar(INNER);
+      anchor.group.add(plane);
+
+      // Shadow of Muse on the video: a light in front of the image and a transparent
+      // shadow-catcher plane just above the video (materials stay unlit).
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      const catcher = new THREE.Mesh(
+        new THREE.PlaneGeometry(INNER, INNER * aspect),
+        new THREE.ShadowMaterial({ opacity: SHADOW_OPACITY })
+      );
+      catcher.position.z = 0.002;
+      catcher.receiveShadow = true;
+      anchor.group.add(catcher);
+      const sun = new THREE.DirectionalLight(0xffffff, 1);
+      sun.position.set(0.35, 0.6, 1.5);
+      sun.target.position.set(0, 0, 0);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      Object.assign(sun.shadow.camera, { left: -0.8, right: 0.8, top: 0.8, bottom: -0.8, near: 0.1, far: 4 });
+      sun.shadow.bias = -0.0005;
+      anchor.group.add(sun, sun.target);
+
+      // Character in front of the video, on the same path as in the C4D scene.
+      // The video is rendered by a static camera at +X looking -X (FOV 25.4°),
+      // so the frame at the path's depth is 9 m wide: 1 image unit = 9 m.
+      let mixer = null;
+      let clipDuration = 10;
+      let updateTrails = null;
+      const gltf = await new GLTFLoader().loadAsync('muse.glb');
+      const model = gltf.scene;
+      const pivot = new THREE.Group();
+      pivot.add(model);
+      pivot.rotation.y = -Math.PI / 2;      // C4D camera axis (+X) -> image normal
+      pivot.scale.setScalar(INNER / SCENE_WIDTH_M);
+      pivot.position.set(0, 0, CHAR_Z);
+      model.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = true; } });
+      anchor.group.add(pivot);
+      // Hair trails (C4D Sweep + Tracer): rebuilt live from baked hair-vertex positions.
+      const trailInfo = await (await fetch('trail.json')).json();
+      const trailData = new Float32Array(await (await fetch('trail.bin')).arrayBuffer());
+      const trailGroup = new THREE.Group();
+      trailGroup.scale.set(0.01, 0.01, -0.01);   // C4D cm (left-handed) -> glTF metres
+      pivot.add(trailGroup);
+      const trailMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, toneMapped: false });
+      const trailMeshes = [];
+      for (let i = 0; i < trailInfo.points; i++) {
+        const m = new THREE.Mesh(new THREE.BufferGeometry(), trailMat);
+        m.frustumCulled = false;
+        m.castShadow = true;
+        trailGroup.add(m); trailMeshes.push(m);
+      }
+      let lastTrailFrame = -1;
+      updateTrails = (t) => {
+        const F = trailInfo.frames, P = trailInfo.points;
+        const f = Math.min(F - 1, Math.floor(t * trailInfo.fps));
+        if (f === lastTrailFrame) return;
+        lastTrailFrame = f;
+        const [[f0, a0], [f1, a1]] = trailInfo.amountKeys;
+        const amount = Math.round(f <= f0 ? a0 : f >= f1 ? a1 : a0 + (a1 - a0) * (f - f0) / (f1 - f0));
+        const start = Math.max(0, f - amount);
+        for (let i = 0; i < P; i++) {
+          const mesh = trailMeshes[i];
+          mesh.geometry.dispose();
+          if (f - start < 1) { mesh.geometry = new THREE.BufferGeometry(); continue; }
+          const pts = [];
+          for (let k = start; k <= f; k++) {
+            const o = (k * P + i) * 3;
+            pts.push(new THREE.Vector3(trailData[o], trailData[o + 1], trailData[o + 2]));
+          }
+          mesh.geometry = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), pts.length * 2, trailInfo.radius_cm, 6, false);
+        }
+      };
+
+      if (gltf.animations.length) {
+        mixer = new THREE.AnimationMixer(model);
+        mixer.clipAction(gltf.animations[0]).play();
+        clipDuration = gltf.animations[0].duration;
+      }
+
+      let visible = false;
+      anchor.onTargetFound = () => {
+        visible = true;
+        hint.hidden = true;
+        found = true;
+        playVideo();
+      };
+      anchor.onTargetLost = () => {
+        visible = false;
+        found = false;
+        hint.hidden = false;
+        video.pause();
+      };
+
+      await mindar.start();
+      hint.hidden = false;
+      const clock = new THREE.Clock();
+      renderer.setAnimationLoop(() => {
+        const dt = clock.getDelta();
+        if (mixer && visible) {
+          const t = video.currentTime % clipDuration;
+          mixer.setTime(t);
+          if (updateTrails) updateTrails(t);
+        }
+        renderer.render(scene, camera);
+      });
+    }
+
+    document.getElementById('go').addEventListener('click', async () => {
+      document.getElementById('start').remove();
+      // Unlock playback inside the tap, before any await.
+      video.play().then(() => { if (!found) video.pause(); }).catch((e) => { lastErr = e.name; });
+      status.hidden = false;
+      soundBtn.hidden = false;
+      try {
+        await start();
+      } catch (e) {
+        hint.hidden = false;
+        hint.textContent = 'Erreur : ' + (e && e.message ? e.message : e);
+        console.error(e);
+      }
+    });
+  </script>
+</body>
+</html>
