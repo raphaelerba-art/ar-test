@@ -23,6 +23,9 @@
     }
     .pill { position: fixed; z-index: 7; border: 0; border-radius: 999px; background: #fff; color: #111; font-size: 15px; padding: 10px 16px; }
     #sound { right: 12px; bottom: 60px; }
+    #presets { position: fixed; z-index: 11; left: 8px; bottom: 60px; color: #fff; font: 13px system-ui; background: #0008; padding: 6px 8px; border-radius: 10px; }
+    #presets button { border: 0; border-radius: 999px; padding: 6px 10px; margin-left: 4px; background: #fff3; color: #fff; font-size: 13px; }
+    #presets button.on { background: #fff; color: #111; }
     #tapplay { left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 17px; padding: 14px 22px; }
   </style>
   <script type="importmap">
@@ -44,6 +47,9 @@
   <div id="hint" hidden>Cherche l'image…</div>
   <div id="status" hidden></div>
   <button id="sound" class="pill" hidden>🔇 Son</button>
+  <div id="presets">Suivi :
+    <button data-p="stable">Stable</button><button data-p="moyen">Moyen</button><button data-p="reactif">Réactif</button>
+  </div>
   <button id="tapplay" class="pill" hidden>▶ Toucher pour lancer la vidéo</button>
 
   <script type="module">
@@ -58,6 +64,21 @@
     const SHADOW_OPACITY = 0.35;
 
     const hint = document.getElementById('hint');
+
+    // Tracking smoothing presets (One Euro filter): ?suivi=stable|moyen|reactif
+    const PRESETS = {
+      stable: { cf: 0.0001, beta: 0.001 },  // very smooth, lags when moving
+      moyen: { cf: 0.001, beta: 0.1 },
+      reactif: { cf: 0.001, beta: 1000 },   // MindAR default: follows fast, more jitter
+    };
+    const suivi = new URLSearchParams(location.search).get('suivi') || 'moyen';
+    const SMOOTH = PRESETS[suivi] || PRESETS.moyen;
+    document.querySelectorAll('#presets button').forEach((b) => {
+      if (b.dataset.p === suivi) b.classList.add('on');
+      b.addEventListener('click', () => {
+        const u = new URL(location.href); u.searchParams.set('suivi', b.dataset.p); location.href = u.toString();
+      });
+    });
 
     // ?debug : no camera, shows the image anchor in front of a fixed camera (desktop check).
     function debugMindar() {
@@ -122,14 +143,15 @@
         imageTargetSrc: 'targets.mind',
         uiScanning: 'no',
         uiLoading: 'yes',
-        filterMinCF: 0.0001,
-        filterBeta: 0.001,
+        filterMinCF: SMOOTH.cf,
+        filterBeta: SMOOTH.beta,
         warmupTolerance: 2,   // show sooner once the image is found
         missTolerance: 30,    // keep the anchor through short tracking drops
       });
       const { renderer, scene, camera } = mindar;
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       const anchor = mindar.addAnchor(0);
+      let fitShadow = () => {};
 
       // Video plane, same aspect as the video, glued on the image.
       await new Promise((res, rej) => {
@@ -164,7 +186,16 @@
       sun.target.position.set(0, 0, 0);
       sun.castShadow = true;
       sun.shadow.mapSize.set(2048, 2048);
-      Object.assign(sun.shadow.camera, { left: -0.8, right: 0.8, top: 0.8, bottom: -0.8, near: 0.1, far: 4 });
+      // The shadow frustum is in world units, which MindAR scales by the target size:
+      // keep it matched to the anchor's scale every frame.
+      let shadowScale = 0;
+      fitShadow = () => {
+        const k = anchor.group.matrixWorld.getMaxScaleOnAxis();
+        if (!k || Math.abs(k - shadowScale) < shadowScale * 0.01) return;
+        shadowScale = k;
+        Object.assign(sun.shadow.camera, { left: -0.8 * k, right: 0.8 * k, top: 0.8 * k, bottom: -0.8 * k, near: 0.1 * k, far: 4 * k });
+        sun.shadow.camera.updateProjectionMatrix();
+      };
       sun.shadow.bias = -0.0005;
       anchor.group.add(sun, sun.target);
 
@@ -249,6 +280,7 @@
           mixer.setTime(t);
           if (updateTrails) updateTrails(t);
         }
+        fitShadow();
         renderer.render(scene, camera);
       });
     }
